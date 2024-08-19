@@ -26,10 +26,9 @@ def parse_args():
         input("Output exists enter to continue or ctrl+c to abort!")
     
     try:
-        args.ftype = getattr(gguf.LlamaFileType, f"MOSTLY_{args.qtype}")
         args.qtype = getattr(gguf.GGMLQuantizationType, args.qtype)
     except AttributeError:
-        parser.error(f"Unknown quant/file type {args.qtype}")
+        parser.error(f"Unknown quant type {args.qtype}")
     
     return args
 
@@ -48,6 +47,14 @@ def load_model(args):
     if "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
         arch = "flux"
         raise ValueError(f"The Diffusers UNET can not be used for this!")
+    elif "model.diffusion_model.double_blocks.0.img_attn.proj.weight" in state_dict:
+        arch = "flux"
+        new_state_dict = {}
+        for k in state_dict.keys():
+            if 'model.diffusion_model' in k:
+                new_k = k.replace('model.diffusion_model.', '')
+                new_state_dict[new_k] = state_dict[k]
+        state_dict = new_state_dict
     elif "double_blocks.0.img_attn.proj.weight" in state_dict:
         arch = "flux" # mmdit ...?
     elif "transformer_blocks.0.attn.add_q_proj.weight" in state_dict:
@@ -67,7 +74,7 @@ def load_model(args):
 def handle_metadata(args, writer, state_dict):
     # TODO: actual metadata
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
-    writer.add_file_type(args.ftype)
+    writer.add_file_type(args.qtype) # TODO: gguf.LlamaFileType
 
 def handle_tensors(args, writer, state_dict):
     # TODO list:
@@ -75,8 +82,7 @@ def handle_tensors(args, writer, state_dict):
 
     max_name_len = max([len(s) for s in state_dict.keys()]) + 4
     for key, data in tqdm(state_dict.items()):
-        if data.dtype == torch.bfloat16:
-            data = data.to(torch.float32)
+        data = data.to(torch.float32)
         data = data.numpy()
 
         old_dtype = data.dtype
@@ -144,7 +150,6 @@ def handle_tensors(args, writer, state_dict):
             data_qtype = gguf.GGMLQuantizationType.F16
             data = gguf.quants.quantize(data, data_qtype)
 
-        assert len(key) < 64, f"Invalid key length! Cannot store in gguf file. {key}"
         new_name = key # do we need to rename?
 
         shape_str = f"{{{', '.join(str(n) for n in reversed(data.shape))}}}"
